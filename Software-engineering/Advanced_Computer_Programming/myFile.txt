@@ -1,0 +1,4 @@
+This is python first program. 
+This is used to handle files.
+Appand Data in it after creation.
+I append this line through code.

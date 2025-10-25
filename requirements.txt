@@ -1,0 +1,6 @@
+google-generativeai
+langchain
+langchain-community
+sentence-transformers
+faiss-cpu
+pywin32
