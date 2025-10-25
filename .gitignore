@@ -1,1 +1,15 @@
+# Ignore environment and secret files
 .env
+*.env
+
+# Ignore Python cache and virtual environments
+__pycache__/
+*.pyc
+venv/
+.env/
+.env.bak
+
+# Ignore FAISS index data and cache files
+faiss_index/
+.cache/
+*.log
