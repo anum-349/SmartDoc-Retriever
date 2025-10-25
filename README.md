@@ -23,12 +23,8 @@ It automatically reads PDFs, Word files, PowerPoints, CSVs, and text files, conv
 SmartDoc-Retriever/
 │
 ├── Software-engineering/        # Folder containing all source documents to index
-├── faiss_index/                 # Saved FAISS vector store
-├── faiss_metadata.json          # Metadata (hashes, timestamps) for file updates
 │
-├── flaskrag.py                  # Flask API version of the RAG system
 ├── RAGChatBot.py                # Main RAG chatbot implementation (console-based)
-├── testing.py                   # Testing or debugging utilities
 │
 ├── requirements.txt             # All Python dependencies
 └── README.md                    # Project documentation (this file)
@@ -106,19 +102,6 @@ Chatbot: Software engineering is ...
 
 ---
 
-## 🧪 Run the Flask API
-
-If you want to expose this as an API endpoint (for integration with a frontend):
-
-```bash
-python flaskrag.py
-```
-
-Then visit:
-
-```
-http://localhost:5000
-```
 
 ---
 
@@ -130,7 +113,7 @@ http://localhost:5000
 | **Embeddings**      | Hugging Face Sentence Transformers        |
 | **Vector Store**    | FAISS                                     |
 | **File Processing** | pdfplumber, python-pptx, docx2txt, pandas |
-| **Frameworks**      | LangChain, Flask                          |
+| **Frameworks**      | LangChain                                 |
 | **Language**        | Python 3.9+                               |
 
 ---
