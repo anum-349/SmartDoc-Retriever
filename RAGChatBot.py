@@ -14,9 +14,12 @@ from langchain_community.llms import GooglePalm
 from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
 import pdfplumber
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Load API key from .env file
-os.environ['GOOGLE_API_KEY'] = 'AIzaSyDpXnQhfq6lKfrXK5n4ka2WBUDZFa8ilco'
+os.environ['GOOGLE_API_KEY'] = os.getenv("GOOGLE_API_KEY")
 try:
     genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
 except Exception as e:
