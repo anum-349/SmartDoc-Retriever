@@ -12,9 +12,6 @@ pandas
 faiss-cpu
 sentence-transformers
 
-# Optional (for Flask API or testing)
-Flask
 python-dotenv
 
-# Typing & Utilities
 typing-extensions

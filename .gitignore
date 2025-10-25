@@ -13,3 +13,7 @@ venv/
 faiss_index/
 .cache/
 *.log
+
+faiss_metadata.json
+flaskrag.py
+testing.py

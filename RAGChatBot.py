@@ -4,14 +4,14 @@ import hashlib
 from typing import List
 
 import google.generativeai as genai
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, CSVLoader, Docx2txtLoader
 from langchain_core.documents import Document
 from pptx import Presentation
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.llms import GooglePalm
-from langchain.chains import RetrievalQA
+from langchain_community.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
 import pdfplumber
 from dotenv import load_dotenv
