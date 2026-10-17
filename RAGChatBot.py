@@ -1,236 +1,282 @@
+import utils.session
 import os
+import sys
 import json
 import hashlib
-from typing import List
+from typing import Dict, List, Tuple, Optional
 
-import google.generativeai as genai
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, CSVLoader, Docx2txtLoader
-from langchain_core.documents import Document
-from pptx import Presentation
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.llms import GooglePalm
-from langchain_community.chains import RetrievalQA
-from langchain_google_genai import ChatGoogleGenerativeAI
-import pdfplumber
 from dotenv import load_dotenv
+import pdfplumber
+from pptx import Presentation
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader, Docx2txtLoader, CSVLoader
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+# ----------------------------------------------------------------------------
+# Config
+# ----------------------------------------------------------------------------
 load_dotenv()
 
-# Load API key from .env file
-os.environ['GOOGLE_API_KEY'] = os.getenv("GOOGLE_API_KEY")
-try:
-    genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
-except Exception as e:
-    print("Error Configuring API: ", e)
-
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
-
-INDEX_METADATA_FILE = "faiss_metadata.json"
+FOLDER_PATH = "./Software-engineering"
 INDEX_FOLDER = "faiss_index"
+INDEX_METADATA_FILE = "faiss_metadata.json"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Set to None to use the default HuggingFace cache location.
+HF_CACHE_FOLDER: Optional[str] = os.getenv("HF_CACHE_FOLDER")  # e.g. C:/Users/you/.cache/huggingface/hub
+LLM_MODEL = "gemini-3.8-flash"
+SUPPORTED_EXTENSIONS = (".pdf", ".txt", ".docx", ".csv", ".pptx")
 
-def compute_file_hash(file_path, chunk_size=8192):
+Metadata = Dict[str, Dict]
+
+
+# ----------------------------------------------------------------------------
+# Hashing / persistence
+# ----------------------------------------------------------------------------
+def compute_file_hash(file_path: str, chunk_size: int = 8192) -> str:
     sha256 = hashlib.sha256()
     try:
         with open(file_path, "rb") as f:
-            while True:
-                 # Standard read operation
-                chunk = f.read(chunk_size) 
-                if not chunk:
-                    break # Exit the loop when done reading
+            while chunk := f.read(chunk_size):
                 sha256.update(chunk)
         return sha256.hexdigest()
     except Exception as e:
         print(f"❌ Error computing hash for {file_path}: {e}")
         return ""
 
-def load_index_and_metadata(embedding_model):
-    vector_store = None
-    if os.path.exists(INDEX_FOLDER):
-        print(f"Loading existing FAISS index from {INDEX_FOLDER}...")
-        try:
-            vector_store = FAISS.load_local(INDEX_FOLDER, embedding_model, allow_dangerous_deseialization=True)        
-        except Exception as e:
-            print(f"❌ Error loading FAISS index: {e}. Rebuilding index.")
 
-    metadata = {}
-    if os.path.exists(INDEX_METADATA_FILE):
+def load_index_and_metadata(embedding_model) -> Tuple[Optional[FAISS], Metadata]:
+    """Load index + metadata. If either is missing/corrupt, return a clean slate
+    so the two never go out of sync (which would cause duplicate vectors)."""
+    vector_store = None
+    metadata: Metadata = {}
+
+    if os.path.isdir(INDEX_FOLDER) and os.path.isfile(INDEX_METADATA_FILE):
         try:
-            with open(INDEX_METADATA_FILE, "r") as f:
+            print(f"Loading existing FAISS index from {INDEX_FOLDER}...")
+            # Safe here because we only load an index that this script wrote.
+            vector_store = FAISS.load_local(
+                INDEX_FOLDER, embedding_model, allow_dangerous_deserialization=True
+            )
+            with open(INDEX_METADATA_FILE, "r", encoding="utf-8") as f:
                 metadata = json.load(f)
         except Exception as e:
-            print(f"❌ Error loading metadata file: {e}. Starting fresh metadata.")
-        
+            print(f"❌ Error loading index/metadata: {e}. Rebuilding from scratch.")
+            vector_store, metadata = None, {}
+
     return vector_store, metadata
 
-def save_index_and_metadata(vector_store, metadata):
-    if vector_store:
+
+def save_index_and_metadata(vector_store: Optional[FAISS], metadata: Metadata) -> None:
+    if vector_store is not None:
         print(f"Saving FAISS index to {INDEX_FOLDER}...")
         vector_store.save_local(INDEX_FOLDER)
-    
-    print(f"Saving Metadata to {INDEX_METADATA_FILE}...")
-    with open(INDEX_METADATA_FILE, "w") as f:
+    print(f"Saving metadata to {INDEX_METADATA_FILE}...")
+    with open(INDEX_METADATA_FILE, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-def update_indexx_with_folder(folder_path, embedding_model, text_splitter):
-    vector_store, metadata = load_index_and_metadata(embedding_model)
-    new_docs = []
 
-    current_files = {}
+# ----------------------------------------------------------------------------
+# Document loading
+# ----------------------------------------------------------------------------
+def load_pdf(file_path: str) -> List[Document]:
+    documents = []
+    with pdfplumber.open(file_path) as pdf:
+        for i, page in enumerate(pdf.pages):
+            text = page.extract_text()  # called once per page
+            if text and text.strip():
+                documents.append(
+                    Document(page_content=text, metadata={"source": file_path, "page": i + 1})
+                )
+    return documents
+
+
+def load_pptx(file_path: str) -> List[Document]:
+    documents = []
+    prs = Presentation(file_path)
+    for slide_no, slide in enumerate(prs.slides, start=1):
+        parts = []
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False) and shape.text_frame.text.strip():
+                parts.append(shape.text_frame.text)
+            if getattr(shape, "has_table", False) and shape.has_table:
+                for row in shape.table.rows:
+                    parts.append(" | ".join(cell.text for cell in row.cells))
+        content = "\n".join(parts).strip()
+        if content:
+            documents.append(
+                Document(page_content=content, metadata={"source": file_path, "slide": slide_no})
+            )
+    return documents
+
+
+def load_single_document(file_path: str) -> List[Document]:
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext == ".pdf":
+            return load_pdf(file_path)
+        if ext == ".txt":
+            return TextLoader(file_path, encoding="utf-8").load()
+        if ext == ".docx":
+            return Docx2txtLoader(file_path).load()
+        if ext == ".csv":
+            return CSVLoader(file_path).load()
+        if ext == ".pptx":
+            return load_pptx(file_path)
+        print(f"⚠️ Unsupported file: {file_path}")
+    except Exception as e:
+        print(f"❌ Error loading {file_path}: {e}")
+    return []
+
+
+# ----------------------------------------------------------------------------
+# Incremental indexing
+# ----------------------------------------------------------------------------
+def scan_folder(folder_path: str) -> Metadata:
+    current: Metadata = {}
     for root, _, files in os.walk(folder_path):
-        for  file in files:
-            file_path = os.path.join(root, file)
-            if file.startswith('.') or file.startswith('~'):
+        for name in files:
+            if name.startswith((".", "~")) or not name.lower().endswith(SUPPORTED_EXTENSIONS):
                 continue
-            file_hash = compute_file_hash(file_path)
-            last_modified = os.path.getmtime(file_path)
-            current_files[file_path] = {"hash": file_hash, "last_modified": last_modified}
+            path = os.path.join(root, name)
+            file_hash = compute_file_hash(path)
+            if not file_hash:
+                continue
+            current[path] = {
+                "hash": file_hash,
+                "last_modified": os.path.getmtime(path),
+                "vector_ids": [],
+            }
+    return current
 
-    deleted_files = [f for f in metadata if f not in current_files]
-    if deleted_files:
-        print(f"Removing {len(deleted_files)} delete file from index")
-        vector_store = None
-        metadata = {}
 
-    files_to_index = []
-    for file_path, file_info in current_files.items():
-        if file_path in  metadata and metadata[file_path]["hash"] == file_info["hash"]:
-            continue
+def update_index_with_folder(folder_path: str, embedding_model, text_splitter) -> Optional[FAISS]:
+    vector_store, metadata = load_index_and_metadata(embedding_model)
+    current_files = scan_folder(folder_path)
 
-        print(f"Process {os.path.basename(file_path)}")
-        files_to_index.append(file_path)
+    deleted = [p for p in metadata if p not in current_files]
+    changed = [
+        p for p, info in current_files.items()
+        if p not in metadata or metadata[p]["hash"] != info["hash"]
+    ]
 
-    if vector_store is None or files_to_index:
-        if vector_store is None:
-            print("Performing full index rebuild...")
-            all_files = list(current_files.keys())
-        else:
-            all_files = files_to_index
-
-        all_documents = []
-
-        for file_path in all_files:
-            docs = load_single_document(file_path)
-            if(docs):
-                chunks = text_splitter.split_documents(docs)
-                if chunks:
-                    all_documents.extend(chunks)
-
-                    if file_path in current_files:
-                        metadata[file_path] = current_files[file_path]
-
-        if not all_documents:
-            print("No documents loaded or chunks generated. Index remains unchanged.")
-            return vector_store, []
-        
-        if vector_store is None:
-            print(f"Building new FAISS index with {len(all_documents)} chunks.")
-            vector_store = FAISS.from_documents(all_documents, embedding_model)
-        else:
-            print(f"Adding {len(all_documents)} new chunks to existing FAISS index.")
-            vector_store.add_documents(all_documents)
-
-        save_index_and_metadata(vector_store, metadata)
-        new_chunks = all_documents
-
-    else:
+    if not deleted and not changed and vector_store is not None:
         print("Index is up to date. No files modified or deleted.")
-    
-    return vector_store, new_chunks
+        return vector_store
 
-def load_pptx(file_path):
-    """Load a PowerPoint file and return Document objects."""
-    documents = []
-    try:
-        prs = Presentation(file_path)
-        text = []
-        for slide in prs.slides:
-            for shape in slide.shapes:
-                if hasattr(shape, "text"):
-                    text.append(shape.text)
-        content = "\n".join(text)
-        documents.append(Document(page_content=content, metadata={"source": file_path}))
-    except Exception as e:
-        print(f"❌ Error loading PowerPoint file {file_path}: {e}")
-    return documents
+    # 1) Remove vectors belonging to deleted or modified files.
+    stale_ids: List[str] = []
+    for path in deleted + [p for p in changed if p in metadata]:
+        stale_ids.extend(metadata[path].get("vector_ids", []))
+    if vector_store is not None and stale_ids:
+        print(f"Removing {len(stale_ids)} stale chunks...")
+        vector_store.delete(stale_ids)
+    for path in deleted:
+        metadata.pop(path, None)
 
-def load_single_document(file_path):
-    documents = []
-    file = os.path.basename(file_path)
-    try:
-        if file.endswith(".pdf"):
-            try:
-                with pdfplumber.open(file_path) as pdf:
-                    docs = [Document(page_content=page.extract_text(), 
-                                    metadata={"source": file_path, "page": i + 1}) 
-                for i, page in enumerate(pdf.pages) if page.extract_text()]
-                documents.extend([doc for doc in docs if doc.page_content.strip()])
-            except Exception as e:
-                print(f"❌ Error reading PDF {file}: {e}")
-                docs = []  # Return an empty list in case of an error                    
-        elif file.endswith(".txt"):
-            documents = TextLoader(file_path, encoding='utf-8') .load()               
-        elif file.endswith(".docx"):
-            documents = Docx2txtLoader(file_path).load()
-        elif file.endswith(".csv"):
-            documents = CSVLoader(file_path).load()
-        elif file.endswith(".pptx"):
-            documents = load_pptx(file_path)
+    # 2) Chunk and embed new/modified files.
+    new_docs: List[Document] = []
+    new_ids: List[str] = []
+    for path in changed:
+        docs = load_single_document(path)
+        chunks = text_splitter.split_documents(docs) if docs else []
+        if not chunks:
+            metadata.pop(path, None)  # nothing indexable; retry next run if it changes
+            continue
+        ids = [f"{current_files[path]['hash']}-{i}" for i in range(len(chunks))]
+        new_docs.extend(chunks)
+        new_ids.extend(ids)
+        metadata[path] = {**current_files[path], "vector_ids": ids}
+
+    if new_docs:
+        if vector_store is None:
+            print(f"Building new FAISS index with {len(new_docs)} chunks...")
+            vector_store = FAISS.from_documents(new_docs, embedding_model, ids=new_ids)
         else:
-            print(f"⚠️ Unsupported file: {file}")
-    except Exception as e:
-        print(f"❌ Error loading {file}: {str(e)}")
+            print(f"Adding {len(new_docs)} chunks to the index...")
+            vector_store.add_documents(new_docs, ids=new_ids)
+    elif vector_store is None:
+        print("No documents loaded or chunks generated.")
+        return None
 
-    return documents
+    save_index_and_metadata(vector_store, metadata)
+    return vector_store
 
-folder_path = "./Software-engineering"  # Change this if needed
 
-if not os.path.exists(folder_path):
-    print(f"❌ Error: The folder '{folder_path}' does not exist.")
-    exit()
-
-if len(os.listdir(folder_path)) == 0:
-    print("❌ Error: No files found in the folder.")
-    exit()
-
-print("load/process documents and update index...")
-    
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-
-# Convert text to embeddings
-print('Initializing HuggingFace Embeddings...')
-embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    cache_folder="C:/Users/akraj/.cache/huggingface/hub",
-    model_kwargs={}  # Keep this empty if not needed
+# ----------------------------------------------------------------------------
+# RAG chain
+# ----------------------------------------------------------------------------
+PROMPT = ChatPromptTemplate.from_template(
+    "You are a helpful assistant. Answer the question using only the context below. "
+    "If the answer is not in the context, say you don't know.\n\n"
+    "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
 )
 
-vector_store, chunks = update_indexx_with_folder(folder_path, embedding_model, text_splitter)
 
-if vector_store is None:
-    print("Error: Vector store could not be created or loaded.")
-    exit()
-    
-# Function to answer queries using RAG
-def answer_query(query):
-    if vector_store is None:
-        return "Error: Document index is not available."
-    
+def build_answer_fn(vector_store: FAISS, llm):
     retriever = vector_store.as_retriever(search_kwargs={"k": 5})
-    qa_chain = RetrievalQA.from_chain_type(llm, retriever=retriever)
-    try:
-        response = qa_chain.invoke({"query": query})
-        return response.get("result", "No answer found.")
-    except Exception as e:
-        return f"An error occurred during query: {e}"
+    chain = PROMPT | llm | StrOutputParser()
 
-# Example user interaction
-if __name__ == "__main__":
+    def answer_query(query: str) -> str:
+        try:
+            docs = retriever.invoke(query)
+            if not docs:
+                return "No relevant documents found."
+            context = "\n\n".join(d.page_content for d in docs)
+            answer = chain.invoke({"context": context, "question": query})
+            sources = sorted({
+                os.path.basename(d.metadata.get("source", "unknown")) for d in docs
+            })
+            return f"{answer}\n\nSources: {', '.join(sources)}"
+        except Exception as e:
+            return f"An error occurred during query: {e}"
+
+    return answer_query
+
+
+# ----------------------------------------------------------------------------
+# Entry point
+# ----------------------------------------------------------------------------
+def main() -> None:
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        sys.exit("❌ GOOGLE_API_KEY is not set. Add it to your .env file.")
+
+    if not os.path.isdir(FOLDER_PATH):
+        sys.exit(f"❌ The folder '{FOLDER_PATH}' does not exist.")
+    if not os.listdir(FOLDER_PATH):
+        sys.exit("❌ No files found in the folder.")
+
+    llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=api_key)
+
+    print("Initializing HuggingFace embeddings...")
+    embedding_model = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        cache_folder=HF_CACHE_FOLDER,
+    )
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+
+    print("Loading/processing documents and updating index...")
+    vector_store = update_index_with_folder(FOLDER_PATH, embedding_model, text_splitter)
+    if vector_store is None:
+        sys.exit("❌ Vector store could not be created or loaded.")
+
+    answer_query = build_answer_fn(vector_store, llm)
+
     while True:
-        user_query = input("Ask a question (or type 'exit' to quit): ")
-        if user_query.lower() == 'exit':
+        user_query = input("Ask a question (or type 'exit' to quit): ").strip()
+        if not user_query:
+            continue
+        if user_query.lower() == "exit":
             break
         print("Thinking...")
-        response = answer_query(user_query)
-        print("\nChatbot: ", response, "\n")
+        print(f"\nChatbot: {answer_query(user_query)}\n")
+
+
+if __name__ == "__main__":
+    main()

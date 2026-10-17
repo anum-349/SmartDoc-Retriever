@@ -1,5 +1,4 @@
 # Ignore environment and secret files
-.env
 *.env
 
 # Ignore Python cache and virtual environments
@@ -17,3 +16,7 @@ faiss_index/
 faiss_metadata.json
 flaskrag.py
 testing.py
+
+Software-engineering/
+config.bat
+node_modules
